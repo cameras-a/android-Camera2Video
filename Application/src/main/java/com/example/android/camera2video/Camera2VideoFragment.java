@@ -45,10 +45,12 @@ import android.support.annotation.NonNull;
 import android.support.v13.app.FragmentCompat;
 import android.support.v4.app.ActivityCompat;
 import android.util.Log;
+import android.util.Range;
 import android.util.Size;
 import android.util.SparseIntArray;
 import android.view.LayoutInflater;
 import android.view.Surface;
+import android.view.SurfaceHolder;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
@@ -58,6 +60,7 @@ import android.widget.Toast;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -69,6 +72,9 @@ public class Camera2VideoFragment extends Fragment
 
     private static final int SENSOR_ORIENTATION_DEFAULT_DEGREES = 90;
     private static final int SENSOR_ORIENTATION_INVERSE_DEGREES = 270;
+    // 帧率
+    private static final int FRAME_RATE = 60;
+    private static final int BIT_RATE = 10000000 * 2;
     private static final SparseIntArray DEFAULT_ORIENTATIONS = new SparseIntArray();
     private static final SparseIntArray INVERSE_ORIENTATIONS = new SparseIntArray();
 
@@ -124,14 +130,12 @@ public class Camera2VideoFragment extends Fragment
             = new TextureView.SurfaceTextureListener() {
 
         @Override
-        public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture,
-                                              int width, int height) {
+        public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
             openCamera(width, height);
         }
 
         @Override
-        public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture,
-                                                int width, int height) {
+        public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int width, int height) {
             configureTransform(width, height);
         }
 
@@ -218,6 +222,11 @@ public class Camera2VideoFragment extends Fragment
     private Integer mSensorOrientation;
     private String mNextVideoAbsolutePath;
     private CaptureRequest.Builder mPreviewBuilder;
+
+    /**
+     * 摄像头方向
+     */
+    private int mCameraSide = CameraCharacteristics.LENS_FACING_BACK;
 
     public static Camera2VideoFragment newInstance() {
         return new Camera2VideoFragment();
@@ -409,11 +418,70 @@ public class Camera2VideoFragment extends Fragment
         return true;
     }
 
+    public void setCameraSide(boolean front) {
+        if (front) {
+            mCameraSide = CameraCharacteristics.LENS_FACING_FRONT;
+        } else {
+            mCameraSide = CameraCharacteristics.LENS_FACING_BACK;
+        }
+    }
+
+    /**
+     * 切换摄像头
+     */
+    private void switchCamera(CameraManager cameraManager, int currentCameraId) {
+        try {
+            for (String cameraId : cameraManager.getCameraIdList()) {
+                CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
+                StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                Size maxSize = getMaxSize(map.getOutputSizes(SurfaceHolder.class));
+                if (currentCameraId == CameraCharacteristics.LENS_FACING_BACK && characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT) {
+                    //前置转后置
+                    mPreviewSize = maxSize;
+                    currentCameraId = CameraCharacteristics.LENS_FACING_FRONT;
+                    mCameraDevice.close();
+                    openCamera(mTextureView.getWidth(), mTextureView.getHeight());
+                    break;
+                } else if (currentCameraId == CameraCharacteristics.LENS_FACING_FRONT && characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) {
+                    //后置转前置
+                    mPreviewSize = maxSize;
+                    currentCameraId = CameraCharacteristics.LENS_FACING_BACK;
+                    mCameraDevice.close();
+                    openCamera(mTextureView.getWidth(), mTextureView.getHeight());
+                    break;
+                }
+            }
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * 获取最大预览尺寸
+     *
+     * @param outputSizes
+     * @return
+     */
+    private Size getMaxSize(Size[] outputSizes) {
+        Size sizeMax = null;
+        if (outputSizes != null) {
+            sizeMax = outputSizes[0];
+            for (Size size : outputSizes) {
+                if (size.getWidth() * size.getHeight() > sizeMax.getWidth() * sizeMax.getHeight()) {
+                    sizeMax = size;
+                }
+            }
+        }
+        return sizeMax;
+    }
+
+
     /**
      * Tries to open a {@link CameraDevice}. The result is listened by `mStateCallback`.
      */
     @SuppressWarnings("MissingPermission")
     private void openCamera(int width, int height) {
+        Log.d(TAG, "openCamera..");
         if (!hasPermissionsGranted(VIDEO_PERMISSIONS)) {
             requestVideoPermissions();
             return;
@@ -451,6 +519,7 @@ public class Camera2VideoFragment extends Fragment
             configureTransform(width, height);
             mMediaRecorder = new MediaRecorder();
             manager.openCamera(cameraId, mStateCallback, null);
+            Log.d(TAG, "openCamera..|");
         } catch (CameraAccessException e) {
             Toast.makeText(activity, "Cannot access the camera.", Toast.LENGTH_SHORT).show();
             activity.finish();
@@ -464,7 +533,55 @@ public class Camera2VideoFragment extends Fragment
         }
     }
 
+    private void printInfo(CameraManager manager) throws CameraAccessException {
+
+        d("cameraCount: " + manager.getCameraIdList().length);
+        for (String cameraId : manager.getCameraIdList()) {
+            d("cameraId: " + cameraId);
+            // 特征
+            CameraCharacteristics characteristics
+                    = manager.getCameraCharacteristics(cameraId);
+
+            List cs = characteristics.getAvailableCaptureRequestKeys();
+            d("getAvailableCaptureRequestKeys: " + cs.size());
+            for (Object item : cs) {
+                d(item.toString());
+            }
+
+            // 该相机的FPS范围
+            Range<Integer>[] fpsRanges =
+                    characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            Log.d("dddd-FPS", "SYNC_MAX_LATENCY_PER_FRAME_CONTROL: " + Arrays.toString(fpsRanges));
+
+            StreamConfigurationMap map = characteristics
+                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+            if (map == null) {
+                Log.d("dddd-FPS-high", "empty");
+            }
+
+            for (Range<Integer> fpsRange : map.getHighSpeedVideoFpsRanges()) {
+                Log.d("dddd-FPS-high", "openCamera: [width, height] = " + fpsRange.toString());
+            }
+
+
+            cs = characteristics.getAvailableCaptureResultKeys();
+            d("getAvailableCaptureResultKeys: " + cs.size());
+            for (Object item : cs) {
+                d(item.toString());
+            }
+
+
+            cs = characteristics.getKeys();
+            d("getKeys: " + cs.size());
+            for (Object item : cs) {
+                d(item.toString());
+            }
+        }
+    }
+
     private void closeCamera() {
+        d("closeCamera..");
         try {
             mCameraOpenCloseLock.acquire();
             closePreviewSession();
@@ -476,6 +593,7 @@ public class Camera2VideoFragment extends Fragment
                 mMediaRecorder.release();
                 mMediaRecorder = null;
             }
+            d("closeCamera..|");
         } catch (InterruptedException e) {
             throw new RuntimeException("Interrupted while trying to lock camera closing.");
         } finally {
@@ -586,8 +704,8 @@ public class Camera2VideoFragment extends Fragment
             mNextVideoAbsolutePath = getVideoFilePath(getActivity());
         }
         mMediaRecorder.setOutputFile(mNextVideoAbsolutePath);
-        mMediaRecorder.setVideoEncodingBitRate(10000000);
-        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setVideoEncodingBitRate(BIT_RATE);
+        mMediaRecorder.setVideoFrameRate(FRAME_RATE);
         mMediaRecorder.setVideoSize(mVideoSize.getWidth(), mVideoSize.getHeight());
         mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
         mMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
@@ -706,6 +824,9 @@ public class Camera2VideoFragment extends Fragment
 
     }
 
+    /**
+     * 报错弹框
+     */
     public static class ErrorDialog extends DialogFragment {
 
         private static final String ARG_MESSAGE = "message";
@@ -734,6 +855,9 @@ public class Camera2VideoFragment extends Fragment
 
     }
 
+    /**
+     * 权限申请弹框
+     */
     public static class ConfirmationDialog extends DialogFragment {
 
         @Override
@@ -744,6 +868,7 @@ public class Camera2VideoFragment extends Fragment
                     .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
                         @Override
                         public void onClick(DialogInterface dialog, int which) {
+                            // 请求权限
                             FragmentCompat.requestPermissions(parent, VIDEO_PERMISSIONS,
                                     REQUEST_VIDEO_PERMISSIONS);
                         }
@@ -758,6 +883,10 @@ public class Camera2VideoFragment extends Fragment
                     .create();
         }
 
+    }
+
+    private void d(String msg) {
+        android.util.Log.d("camera2", msg);
     }
 
 }
